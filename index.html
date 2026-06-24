@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GTA MEGADRIVE</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #2b2b2b;
+    color: #fff;
+    font-family: "Comic Sans MS", "Marker Felt", cursive, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: center;
+  }
+  h1 {
+    margin: 6px 0;
+    font-size: 28px;
+    color: #ffe14d;
+    text-shadow: 3px 3px 0 #000, -1px -1px 0 #c0392b;
+    letter-spacing: 2px;
+  }
+  #game {
+    background: #6ab04c;
+    border: 6px solid #000;
+    border-radius: 4px;
+    image-rendering: pixelated;
+    touch-action: none;
+  }
+  #hint {
+    font-size: 13px;
+    color: #ccc;
+    margin-top: 6px;
+    text-align: center;
+  }
+  .touch {
+    display: flex;
+    gap: 40px;
+    margin-top: 8px;
+  }
+  .touch button {
+    width: 90px;
+    height: 60px;
+    font-size: 30px;
+    font-weight: bold;
+    background: #e67e22;
+    color: #fff;
+    border: 4px solid #000;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .touch button:active { background: #d35400; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>🚗 GTA MEGADRIVE 🌴</h1>
+  <canvas id="game" width="400" height="600"></canvas>
+  <div id="hint">◀ / ▶ or A / D to steer &nbsp;•&nbsp; Avoid the people &nbsp;•&nbsp; Lure police into rocks &amp; palm trees</div>
+  <div class="touch">
+    <button id="leftBtn">◀</button>
+    <button id="rightBtn">▶</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ---- Road layout ----
+const ROAD_X = 60;          // left edge of road
+const ROAD_W = 280;         // road width
+const ROAD_R = ROAD_X + ROAD_W;
+
+// ---- Game state ----
+let keys = {};
+let state = 'start';        // start | playing | dead
+let score = 0;
+let best = 0;
+let speed = 3;              // world scroll speed
+let dashOffset = 0;
+
+const player = {
+  x: W / 2 - 16,
+  y: H - 110,
+  w: 32,
+  h: 56,
+  color: '#e74c3c'
+};
+
+// Entity lists
+let people = [];     // pedestrians to avoid
+let obstacles = [];  // rocks & palm trees (deadly to player, and to police)
+let police = [];     // chasing cop cars
+
+let spawnPedTimer = 0;
+let spawnObsTimer = 0;
+let policeTimer = 300;   // frames until first cop
+let frame = 0;
+
+// ---- Input ----
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (['arrowleft','arrowright','arrowup','arrowdown',' '].includes(e.key.toLowerCase())) e.preventDefault();
+  if (state !== 'playing' && (e.key === ' ' || e.key === 'Enter')) startGame();
+});
+document.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function bindBtn(id, key) {
+  const b = document.getElementById(id);
+  const on = e => { e.preventDefault(); keys[key] = true; if (state !== 'playing') startGame(); };
+  const off = e => { e.preventDefault(); keys[key] = false; };
+  b.addEventListener('mousedown', on);
+  b.addEventListener('touchstart', on, {passive:false});
+  b.addEventListener('mouseup', off);
+  b.addEventListener('mouseleave', off);
+  b.addEventListener('touchend', off, {passive:false});
+}
+bindBtn('leftBtn', 'arrowleft');
+bindBtn('rightBtn', 'arrowright');
+canvas.addEventListener('mousedown', () => { if (state !== 'playing') startGame(); });
+canvas.addEventListener('touchstart', () => { if (state !== 'playing') startGame(); }, {passive:true});
+
+function startGame() {
+  state = 'playing';
+  score = 0;
+  speed = 3;
+  people = [];
+  obstacles = [];
+  police = [];
+  spawnPedTimer = 40;
+  spawnObsTimer = 90;
+  policeTimer = 360;
+  frame = 0;
+  player.x = W / 2 - player.w / 2;
+}
+
+// ---- Spawning ----
+function randRoadX(width) {
+  return ROAD_X + 10 + Math.random() * (ROAD_W - 20 - width);
+}
+
+function spawnPed() {
+  people.push({
+    x: randRoadX(20),
+    y: -40,
+    w: 20, h: 30,
+    shirt: ['#3498db','#9b59b6','#1abc9c','#f1c40f','#e67e22'][Math.floor(Math.random()*5)]
+  });
+}
+
+function spawnObstacle() {
+  const isRock = Math.random() < 0.5;
+  // Obstacles spawn at the road edges mostly, so there's a path through
+  const onLeft = Math.random() < 0.5;
+  const w = isRock ? 44 : 40;
+  const x = onLeft ? ROAD_X + 6 : ROAD_R - 6 - w;
+  obstacles.push({ x, y: -60, w, h: isRock ? 36 : 54, type: isRock ? 'rock' : 'palm' });
+}
+
+function spawnPolice() {
+  police.push({
+    x: Math.random() < 0.5 ? ROAD_X + 10 : ROAD_R - 50,
+    y: -80,
+    w: 32, h: 56,
+    flash: 0,
+    crashed: false
+  });
+}
+
+// ---- Collision ----
+function hit(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// ---- Update ----
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+  score += 1;
+  if (frame % 600 === 0) speed += 0.5;   // gradually harder
+  dashOffset = (dashOffset + speed) % 40;
+
+  // Steering
+  const steer = 4.5;
+  if (keys['arrowleft'] || keys['a']) player.x -= steer;
+  if (keys['arrowright'] || keys['d']) player.x += steer;
+  player.x = Math.max(ROAD_X + 2, Math.min(ROAD_R - player.w - 2, player.x));
+
+  // Spawn timers
+  if (--spawnPedTimer <= 0) { spawnPed(); spawnPedTimer = 50 + Math.random() * 60; }
+  if (--spawnObsTimer <= 0) { spawnObstacle(); spawnObsTimer = 110 + Math.random() * 90; }
+  if (--policeTimer <= 0 && police.length < 2) { spawnPolice(); policeTimer = 600 + Math.random() * 400; }
+
+  // Move pedestrians
+  for (const p of people) {
+    p.y += speed;
+    // people wander a little
+    p.x += Math.sin((frame + p.y) * 0.1) * 0.6;
+    if (hit(player, p)) { gameOver('You ran over a pedestrian! 🚑'); return; }
+  }
+  people = people.filter(p => p.y < H + 40);
+
+  // Move obstacles
+  for (const o of obstacles) {
+    o.y += speed;
+    if (hit(player, o)) {
+      gameOver(o.type === 'rock' ? 'You smashed into a rock! 🪨' : 'You hit a palm tree! 🌴');
+      return;
+    }
+  }
+  obstacles = obstacles.filter(o => o.y < H + 60);
+
+  // Move & steer police toward player
+  for (const cop of police) {
+    if (cop.crashed) { cop.y += speed; cop.flash++; continue; }
+    cop.flash++;
+    // chase: move down a bit faster than scroll, home in horizontally on player
+    cop.y += speed + 1.2;
+    const dx = (player.x) - cop.x;
+    cop.x += Math.max(-3, Math.min(3, dx * 0.08));
+    cop.x = Math.max(ROAD_X + 2, Math.min(ROAD_R - cop.w - 2, cop.x));
+
+    // Cop crashes into obstacles -> you escape it
+    for (const o of obstacles) {
+      if (hit(cop, o)) {
+        cop.crashed = true;
+        score += 250;
+        break;
+      }
+    }
+    // Cop catches you
+    if (!cop.crashed && hit(player, cop)) { gameOver('The police busted you! 🚓'); return; }
+  }
+  police = police.filter(c => c.y < H + 80);
+}
+
+function gameOver(reason) {
+  state = 'dead';
+  best = Math.max(best, score);
+  deathReason = reason;
+}
+let deathReason = '';
+
+// ---- Drawing (paint-like) ----
+function drawRoad() {
+  // grass
+  ctx.fillStyle = '#6ab04c';
+  ctx.fillRect(0, 0, W, H);
+  // grass texture blobs
+  ctx.fillStyle = '#5aa03c';
+  for (let i = 0; i < 8; i++) {
+    const gy = ((i * 90 + dashOffset * 2) % (H + 40)) - 20;
+    ctx.beginPath();
+    ctx.ellipse(20, gy, 12, 8, 0, 0, Math.PI * 2);
+    ctx.ellipse(W - 25, gy + 45, 14, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // road
+  ctx.fillStyle = '#555';
+  ctx.fillRect(ROAD_X, 0, ROAD_W, H);
+  // road edges
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(ROAD_X, 0, 6, H);
+  ctx.fillRect(ROAD_R - 6, 0, 6, H);
+  // dashed center line
+  ctx.fillStyle = '#f1c40f';
+  for (let y = -40 + dashOffset; y < H; y += 40) {
+    ctx.fillRect(W / 2 - 3, y, 6, 22);
+  }
+}
+
+function drawCar(c, body) {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  // body
+  ctx.fillStyle = body;
+  ctx.fillRect(0, 0, c.w, c.h);
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, c.w, c.h);
+  // windows
+  ctx.fillStyle = '#bde3ff';
+  ctx.fillRect(4, 6, c.w - 8, 12);
+  ctx.fillRect(4, c.h - 20, c.w - 8, 12);
+  // wheels
+  ctx.fillStyle = '#111';
+  ctx.fillRect(-4, 8, 4, 14);
+  ctx.fillRect(c.w, 8, 4, 14);
+  ctx.fillRect(-4, c.h - 22, 4, 14);
+  ctx.fillRect(c.w, c.h - 22, 4, 14);
+  ctx.restore();
+}
+
+function drawPolice(cop) {
+  drawCar(cop, cop.crashed ? '#7f8c8d' : '#ffffff');
+  ctx.save();
+  ctx.translate(cop.x, cop.y);
+  // light bar
+  const on = Math.floor(cop.flash / 6) % 2 === 0;
+  const barY = cop.h / 2 - 4;
+  const halfBar = (cop.w - 12) / 2;
+  ctx.fillStyle = on ? '#e74c3c' : '#2980d9';
+  ctx.fillRect(6, barY, halfBar, 8);
+  ctx.fillStyle = on ? '#2980d9' : '#e74c3c';
+  ctx.fillRect(6 + halfBar, barY, halfBar, 8);
+  if (cop.crashed) {
+    ctx.fillStyle = '#000';
+    ctx.font = '18px sans-serif';
+    ctx.fillText('💥', cop.w / 2 - 9, cop.h / 2 + 6);
+  }
+  ctx.restore();
+}
+
+function drawPed(p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  // head
+  ctx.fillStyle = '#f0c27b';
+  ctx.beginPath();
+  ctx.arc(p.w / 2, 6, 6, 0, Math.PI * 2);
+  ctx.fill();
+  // body
+  ctx.fillStyle = p.shirt;
+  ctx.fillRect(p.w / 2 - 7, 11, 14, 12);
+  // legs
+  ctx.fillStyle = '#34495e';
+  ctx.fillRect(p.w / 2 - 6, 23, 5, 9);
+  ctx.fillRect(p.w / 2 + 1, 23, 5, 9);
+  ctx.restore();
+}
+
+function drawObstacle(o) {
+  ctx.save();
+  ctx.translate(o.x, o.y);
+  if (o.type === 'rock') {
+    ctx.fillStyle = '#95a5a6';
+    ctx.beginPath();
+    ctx.moveTo(2, o.h);
+    ctx.lineTo(8, o.h * 0.3);
+    ctx.lineTo(o.w * 0.5, 2);
+    ctx.lineTo(o.w - 8, o.h * 0.4);
+    ctx.lineTo(o.w - 2, o.h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#7f8c8d';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#7f8c8d';
+    ctx.fillRect(o.w * 0.3, o.h * 0.5, 6, 4);
+  } else {
+    // palm tree
+    ctx.fillStyle = '#8e5a2b';
+    ctx.fillRect(o.w / 2 - 4, o.h * 0.4, 8, o.h * 0.6);
+    ctx.fillStyle = '#27ae60';
+    for (let a = 0; a < 5; a++) {
+      const ang = (a / 5) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.ellipse(o.w / 2 + Math.cos(ang) * 12, o.h * 0.35 + Math.sin(ang) * 8,
+                  13, 6, ang, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#16a085';
+    ctx.beginPath();
+    ctx.arc(o.w / 2, o.h * 0.35, 7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, 26);
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = '16px "Comic Sans MS", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 8, 19);
+  ctx.textAlign = 'right';
+  ctx.fillText('BEST: ' + best, W - 8, 19);
+  ctx.textAlign = 'left';
+}
+
+function drawOverlay(title, subtitle, sub2) {
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffe14d';
+  ctx.font = '34px "Comic Sans MS", sans-serif';
+  ctx.fillText(title, W / 2, H / 2 - 40);
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px "Comic Sans MS", sans-serif';
+  ctx.fillText(subtitle, W / 2, H / 2 + 4);
+  if (sub2) {
+    ctx.fillStyle = '#9be39b';
+    ctx.fillText(sub2, W / 2, H / 2 + 34);
+  }
+  ctx.textAlign = 'left';
+}
+
+function render() {
+  drawRoad();
+  for (const o of obstacles) drawObstacle(o);
+  for (const p of people) drawPed(p);
+  for (const cop of police) drawPolice(cop);
+  if (state === 'playing' || state === 'dead') drawCar(player, player.color);
+  drawHUD();
+
+  if (state === 'start') {
+    drawOverlay('GTA MEGADRIVE', 'Steer ◀ ▶ — dodge people!', 'Press SPACE / tap to drive');
+  } else if (state === 'dead') {
+    drawOverlay('BUSTED!', deathReason, 'Score ' + score + ' — Press SPACE to retry');
+  }
+}
+
+function loop() {
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
