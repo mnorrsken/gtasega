@@ -176,7 +176,8 @@ let keys = {};
 let state = 'start';        // start | playing | dead
 let score = 0;
 let best = 0;
-let speed = 2.5;            // world scroll speed (gentle)
+const BASE_SPEED = 2.5;     // starting scroll speed
+let speed = BASE_SPEED;     // world scroll speed (grows over time)
 let dashOffset = 0;
 
 let heat = 0;               // police speed bonus, grows per person hit
@@ -236,7 +237,7 @@ function startGame() {
   Audio.startMusic();
   state = 'playing';
   score = 0;
-  speed = 2.5;
+  speed = BASE_SPEED;
   heat = 0;
   peopleHit = 0;
   people = [];
@@ -296,7 +297,8 @@ function update() {
   if (state !== 'playing') return;
   frame++;
   score += 1;
-  if (frame % 900 === 0) speed += 0.25;       // very gradual ramp
+  // Speed doubles roughly every 2 minutes (7200 frames @ 60fps), and keeps doubling.
+  speed = BASE_SPEED * Math.pow(2, frame / 7200);
   if (heat > 0) heat = Math.max(0, heat - 0.0006); // slowly cool down
   dashOffset = (dashOffset + speed) % 40;
 
@@ -320,7 +322,9 @@ function update() {
       heat += 0.35;                 // police get faster for every person hit
       score += 25;
       Audio.sfxHitPerson();
-      if (police.length < 3) spawnPolice();  // hitting people brings the cops
+      // Only ever one cop: the first hit dispatches it; later hits just add
+      // heat (the heat term in `approach` makes that one cop chase faster).
+      if (police.length === 0) spawnPolice();
     }
   }
   people = people.filter(p => p.y < H + 40 && !(p.hit && p.y > player.y + 30));
