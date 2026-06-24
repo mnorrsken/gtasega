@@ -96,6 +96,8 @@ const ROAD_R = ROAD_X + ROAD_W;
 // ============================================================
 const Audio = (() => {
   let actx = null, master = null, muted = false, seqTimer = null, step = 0;
+  const BASE_STEP_MS = 140;     // music tempo at normal speed
+  let stepMs = BASE_STEP_MS;    // current tempo (shrinks as the car speeds up)
   const N = {C3:130.81,D3:146.83,E3:164.81,F3:174.61,G3:196,A3:220,B3:246.94,
              C4:261.63,D4:293.66,E4:329.63,F4:349.23,G4:392,A4:440,B4:493.88,
              C5:523.25,D5:587.33,E5:659.25,_:0};
@@ -135,22 +137,30 @@ const Audio = (() => {
     src.start();
   }
 
+  function nextStep() {
+    const t = actx.currentTime + 0.02;
+    const d = stepMs / BASE_STEP_MS;   // scale note length with tempo
+    tone(melody[step], t, 0.12 * d, 'square', 0.12);
+    tone(bass[step],   t, 0.16 * d, 'triangle', 0.22);
+    step = (step + 1) % melody.length;
+    seqTimer = setTimeout(nextStep, stepMs);   // self-scheduling, reads live tempo
+  }
   function startMusic() {
     ensure();
     if (seqTimer) return;
     step = 0;
-    seqTimer = setInterval(() => {
-      const t = actx.currentTime + 0.02;
-      tone(melody[step], t, 0.12, 'square', 0.12);
-      tone(bass[step],   t, 0.16, 'triangle', 0.22);
-      step = (step + 1) % melody.length;
-    }, 140);
+    nextStep();
   }
-  function stopMusic() { if (seqTimer) { clearInterval(seqTimer); seqTimer = null; } }
+  function stopMusic() { if (seqTimer) { clearTimeout(seqTimer); seqTimer = null; } }
 
   return {
     resume() { ensure(); if (actx.state === 'suspended') actx.resume(); },
     startMusic, stopMusic,
+    // Speed the music up with the car, but only "slightly" and up to a limit.
+    setTempo(speedRatio) {
+      const rate = Math.min(1.5, 1 + (speedRatio - 1) * 0.2);  // cap at 1.5x faster
+      stepMs = BASE_STEP_MS / rate;
+    },
     toggleMute() {
       muted = !muted;
       if (master) master.gain.value = muted ? 0 : 0.18;
@@ -297,8 +307,9 @@ function update() {
   if (state !== 'playing') return;
   frame++;
   score += 1;
-  // Speed doubles roughly every 2 minutes (7200 frames @ 60fps), and keeps doubling.
-  speed = BASE_SPEED * Math.pow(2, frame / 7200);
+  // Speed doubles roughly every minute (3600 frames @ 60fps), and keeps doubling.
+  speed = BASE_SPEED * Math.pow(2, frame / 3600);
+  Audio.setTempo(speed / BASE_SPEED);    // music speeds up with the car (capped)
   if (heat > 0) heat = Math.max(0, heat - 0.0006); // slowly cool down
   dashOffset = (dashOffset + speed) % 40;
 
@@ -369,6 +380,10 @@ function update() {
     if (!cop.crashed && hit(player, cop)) { Audio.sfxBusted(); gameOver('The police busted you! 🚓'); return; }
   }
   police = police.filter(c => c.y < H + 80 && c.y > -120);
+
+  // Looping siren while a cop is actively chasing
+  const chasing = police.some(c => !c.crashed && !c.giveUp);
+  if (chasing && frame % 48 === 0) Audio.sfxSiren();
 }
 
 function gameOver(reason) {
